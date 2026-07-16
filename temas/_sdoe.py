@@ -1,4 +1,6 @@
 import json
+from base64 import b64encode
+from urllib.parse import urlencode
 
 import scrapy
 
@@ -65,20 +67,76 @@ class SdoeSpider(DiarioSpider):
             if not data_publicacao:
                 continue
             data_iso = data_publicacao.isoformat()
-            link = (
+            link_pdf = (
                 f"{self.arquivos_url}/{self.codigo_diario}/arquivos/"
                 f"resumoDiario/{data_iso}/{data_iso}.pdf"
             )
+            link_busca = self._link_busca(tema, data_publicacao)
             titulo = registro.get("titulo") or registro.get("nomeCategoria") or "Diário Oficial"
             texto = registro.get("texto") or registro.get("resumo") or ""
-            yield self.resultado(
-                link,
+            resultado = self.resultado(
+                link_pdf,
                 tema,
                 data_publicacao,
                 titulo,
                 extrair_contexto(texto, tema),
             )
+            yield scrapy.Request(
+                link_pdf,
+                method="HEAD",
+                callback=self._finalizar_link,
+                errback=self._usar_link_busca,
+                dont_filter=True,
+                meta={
+                    "handle_httpstatus_all": True,
+                    "resultado": resultado,
+                    "link_pdf": link_pdf,
+                    "link_busca": link_busca,
+                },
+            )
 
         proximo = primeiro + len(registros)
         if registros and proximo < total:
             yield self._request(tema, proximo)
+
+    def _link_busca(self, tema, data_publicacao):
+        data = data_publicacao.strftime("%d/%m/%Y")
+        diario = b64encode(str(self.codigo_diario).encode("ascii")).decode("ascii")
+        parametros = urlencode(
+            {
+                "diario": diario,
+                "inicio": data,
+                "fim": data,
+                "palavra": tema,
+                "consultar": "true",
+            }
+        )
+        return f"{self.web_url.rstrip('/')}/#/busca-avancada?{parametros}"
+
+    @staticmethod
+    def _pdf_abre_no_navegador(response):
+        tipo = response.headers.get(b"Content-Type", b"").decode(
+            "latin-1", errors="replace"
+        )
+        disposicao = response.headers.get(b"Content-Disposition", b"").decode(
+            "latin-1", errors="replace"
+        )
+        return (
+            200 <= response.status < 300
+            and tipo.partition(";")[0].strip().lower() == "application/pdf"
+            and "attachment" not in disposicao.lower()
+        )
+
+    def _finalizar_link(self, response):
+        resultado = response.meta["resultado"]
+        resultado["link"] = (
+            response.meta["link_pdf"]
+            if self._pdf_abre_no_navegador(response)
+            else response.meta["link_busca"]
+        )
+        return resultado
+
+    def _usar_link_busca(self, failure):
+        resultado = failure.request.meta["resultado"]
+        resultado["link"] = failure.request.meta["link_busca"]
+        return resultado
