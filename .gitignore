@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+saida.json
+resultados_nordeste.xlsx
+*.xlsx
